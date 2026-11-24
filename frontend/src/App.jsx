@@ -17,18 +17,56 @@ const STARTERS = [
   "Is my test table enough so far?",
 ];
 
+const GENERAL_STARTERS = [
+  "I want to understand...",
+  "Help me work through a problem",
+  "Check my understanding of...",
+];
+
+const MODES = [
+  { id: "socratic", name: "Socratic", desc: "Asks guiding questions so you work out the answer yourself." },
+  { id: "baseline", name: "Baseline", desc: "Answers your questions directly." },
+];
+
+const SUBJECTS = [
+  { id: "testing", name: "Software testing", desc: "Practise test design on a set task, with a test case table and four stages." },
+  { id: "general", name: "General learning", desc: "Talk through any topic you want to understand. No set task." },
+];
+
+const modeName = (id) => (MODES.find((m) => m.id === id) || MODES[0]).name;
+const subjectShort = (id) => (id === "general" ? "General" : "Testing");
+
+// Shown in the About dialog. 
+const CREDITS = [
+  ["Project", "TestSocratic: An LLM-Based Socratic Learning Companion for Reflective Test Design, Debugging Reasoning, and Software Testing Education"],
+  ["Student Name", "Ng Wei Ting Elysia"],
+  ["Matrix No.", "U2420585K"],
+  ["Course", "CT3079 Mini Capstone"],
+  ["Programme", "Bachelor of Technology in Computing"],
+  ["Specializtion", "Software Engineering"],
+  ["School", "Nanyang Technological University College of Computing and Data Science (CCDS)"],
+  ["Supervisor", "Dr Owen Noel Newton Fernando"],
+  ["Examiner", ""],
+  ["Date", "November 2026"],
+  //["Built with", "React, FastAPI, Claude (Anthropic) and Azure App Service"],
+  //["Inspired by", "Xi, Zhang & Wang (2026), Computers & Education 241, 105494"],
+];
+
 const EMPTY_DRAFT = { title: "", description: "", code: "" };
 const EMPTY_ROW = { data: "", expected: "", reason: "" };
 
-function newSession(mode = "socratic") {
-  return { id: crypto.randomUUID(), mode, stage: "orientation", task: null, tests: [], messages: [], createdAt: Date.now() };
+function newSession() {
+  return { id: crypto.randomUUID(), mode: "socratic", subject: "testing", configured: false, stage: "orientation", task: null, tests: [], messages: [], createdAt: Date.now() };
 }
 
 function loadSessions() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
-    if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      // chats saved before the setup step existed are testing chats that are already set up
+      return parsed.map((s) => ({ subject: "testing", configured: true, ...s }));
+    }
   } catch {
     // ignore and start fresh
   }
@@ -141,13 +179,19 @@ export default function App() {
     document.documentElement.dataset.theme = theme;
     try { localStorage.setItem("ts-theme", theme); } catch {}
   }, [theme]);
+  const [pick, setPick] = useState({ mode: null, subject: null });
+  const [menuOpen, setMenuOpen] = useState(false);
+  const aboutRef = useRef(null);
   const logRef = useRef(null);
   const inputRef = useRef(null);
 
   const active = sessions.find((s) => s.id === activeId) || sessions[0];
   const tests = active.tests || [];
   const locked = active.messages.length > 0;
-  const needsTask = !active.task && !locked;
+  const needsSetup = !active.configured;
+  const isGeneral = active.subject === "general";
+  const needsTask = !needsSetup && !isGeneral && !active.task && !locked;
+  const solo = needsSetup || isGeneral;
   const visible = sessions.filter((s) => s.messages.length > 0 || s.id === active.id);
   const stageIndex = Math.max(0, STAGES.findIndex((s) => s.id === active.stage));
   const stage = STAGES[stageIndex];
@@ -170,6 +214,13 @@ export default function App() {
   }, [sessions]);
 
   useEffect(() => {
+    if (!menuOpen) return;
+    const onKey = (e) => e.key === "Escape" && setMenuOpen(false);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [menuOpen]);
+
+  useEffect(() => {
     const el = logRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [active.id, active.messages.length, loading]);
@@ -181,20 +232,23 @@ export default function App() {
   function newChat() {
     if (loading) return;
     if (!locked) {
-      updateSession(active.id, { task: null, tests: [], stage: "orientation" });
+      updateSession(active.id, { configured: false, task: null, tests: [], stage: "orientation" });
     } else {
       const s = newSession();
       setSessions((prev) => [s, ...prev]);
       setActiveId(s.id);
     }
+    setPick({ mode: null, subject: null });
     setInput("");
     setError("");
+    setMenuOpen(false);
   }
 
   function openChat(id) {
     if (loading) return;
     setActiveId(id);
     setError("");
+    setMenuOpen(false);
   }
 
   function deleteChat(id) {
@@ -211,8 +265,15 @@ export default function App() {
     if (id === active.id) setActiveId(remaining[0].id);
   }
 
-  function chooseMode(mode) {
-    if (!locked) updateSession(active.id, { mode });
+  function confirmSetup() {
+    if (!pick.mode || !pick.subject) return;
+    updateSession(active.id, { mode: pick.mode, subject: pick.subject, configured: true, task: null, tests: [], stage: "orientation" });
+    setError("");
+  }
+
+  function openAbout() {
+    setMenuOpen(false);
+    aboutRef.current?.showModal();
   }
 
   function chooseExample(ex) {
@@ -264,7 +325,7 @@ export default function App() {
 
   async function send() {
     const text = input.trim();
-    if (!text || loading || needsTask) return;
+    if (!text || loading || needsTask || needsSetup) return;
     const sid = active.id;
     const before = active.messages;
     const next = [...before, { role: "user", content: text }];
@@ -278,11 +339,12 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           mode: active.mode,
+          subject: active.subject,
           messages: next,
           session_id: sid,
           stage: active.stage,
-          task: active.task,
-          tests,
+          task: isGeneral ? null : active.task,
+          tests: isGeneral ? [] : tests,
         }),
       });
       if (!res.ok) throw new Error("the server returned error " + res.status);
@@ -306,7 +368,7 @@ export default function App() {
 
   function downloadTranscript() {
     const lines = active.messages.map((m) => (m.role === "user" ? "You: " : assistantName + ": ") + m.content);
-    let header = `Session ${active.id} (${active.mode})`;
+    let header = `Session ${active.id} (${active.mode}, ${active.subject})`;
     if (active.task) header += `\nTask: ${active.task.title}`;
     const filled = tests
       .map((t, i) => ({ t, n: i + 1 }))
@@ -328,11 +390,27 @@ export default function App() {
   }
 
   return (
-    <div className="app">
-      <aside className="sidebar" aria-label="Chat history">
+    <div className={"app" + (solo ? " solo" : "")}>
+      <header className="topbar">
+        <button className="btn small" onClick={() => setMenuOpen(true)} aria-expanded={menuOpen} aria-controls="sidebar">
+          Menu
+        </button>
+        <span className="topbar-title">TestSocratic</span>
+        <button className="btn small primary" onClick={newChat} disabled={loading}>
+          New chat
+        </button>
+      </header>
+      {menuOpen && <div className="scrim" onClick={() => setMenuOpen(false)} />}
+
+      <aside id="sidebar" className={"sidebar" + (menuOpen ? " open" : "")} aria-label="Chat history">
         <div className="brand">
-          <div className="brand-name">TestSocratic</div>
-          <div className="brand-sub">Practise test design by answering questions</div>
+          <div>
+            <div className="brand-name">TestSocratic</div>
+            <div className="brand-sub">Socratic Learning Companion </div>
+          </div>
+          <button className="btn quiet small sidebar-close" onClick={() => setMenuOpen(false)}>
+            Close
+          </button>
         </div>
         <button className="btn primary block" onClick={newChat} disabled={loading}>
           New chat
@@ -348,8 +426,9 @@ export default function App() {
               >
                 <span className="chat-title">{chatTitle(s)}</span>
                 <span className="chat-meta">
-                  <span className={"badge " + s.mode}>{s.mode === "socratic" ? "Socratic" : "Baseline"}</span>
-                  <span>{formatDate(s.createdAt)}</span>
+                  <span className={"badge " + s.mode}>{modeName(s.mode)}</span>
+                  <span className="badge">{subjectShort(s.subject)}</span>
+                  <span className="chat-date">{formatDate(s.createdAt)}</span>
                 </span>
               </button>
               <button className="icon-btn" aria-label={"Delete chat: " + chatTitle(s)} onClick={() => deleteChat(s.id)} disabled={loading}>
@@ -364,29 +443,66 @@ export default function App() {
         >
           {theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
         </button>
+        <button className="btn quiet small theme-toggle" onClick={openAbout}>
+          About this project
+        </button>
         <p className="privacy">
-          Chats are logged anonymously for a university project. Don't enter private information.
+          Don't enter private or confidential information. Chats are logged anonymously for the project.
         </p>
       </aside>
 
+      {needsSetup && (
+        <main className="setup">
+          <div className="setup-inner">
+            <h1>Set up your chat</h1>
+            <p className="lede">Choose how you want to be helped and what you want to learn.</p>
+            <fieldset className="choices">
+              <legend>How should it help you?</legend>
+              {MODES.map((m) => (
+                <label className="choice" key={m.id}>
+                  <input type="radio" name="mode" value={m.id} checked={pick.mode === m.id} onChange={() => setPick({ ...pick, mode: m.id })} />
+                  <span className="choice-title">{m.name}</span>
+                  <span className="choice-desc">{m.desc}</span>
+                </label>
+              ))}
+            </fieldset>
+            <fieldset className="choices">
+              <legend>What do you want to learn?</legend>
+              {SUBJECTS.map((x) => (
+                <label className="choice" key={x.id}>
+                  <input type="radio" name="subject" value={x.id} checked={pick.subject === x.id} onChange={() => setPick({ ...pick, subject: x.id })} />
+                  <span className="choice-title">{x.name}</span>
+                  <span className="choice-desc">{x.desc}</span>
+                </label>
+              ))}
+            </fieldset>
+            <button className="btn primary" onClick={confirmSetup} disabled={!pick.mode || !pick.subject}>
+              Start chat
+            </button>
+            <p className="setup-note">Your choices are fixed once you send your first message. Start a new chat to try another combination.</p>
+          </div>
+        </main>
+      )}
+
+      {!solo && (
       <main className="workspace">
         <section>
           <div className="mode-row">
-            <div className="segmented" role="group" aria-label="Mode">
-              <button aria-pressed={active.mode === "socratic"} onClick={() => chooseMode("socratic")} disabled={locked}>
-                Socratic
-              </button>
-              <button aria-pressed={active.mode === "baseline"} onClick={() => chooseMode("baseline")} disabled={locked}>
-                Baseline
-              </button>
-            </div>
+            <span className="setup-summary">
+              <span className={"badge " + active.mode}>{modeName(active.mode)}</span> Software testing
+            </span>
             <p className="mode-hint">
               {locked
-                ? "The mode is fixed once a chat starts. Start a new chat to try the other one."
+                ? "Fixed once a chat starts. Start a new chat to try another setup."
                 : active.mode === "socratic"
                 ? "The tutor asks guiding questions and doesn't hand over answers."
                 : "The assistant answers your questions directly."}
             </p>
+            {!locked && (
+              <button className="btn quiet small" onClick={newChat}>
+                Change options
+              </button>
+            )}
           </div>
         </section>
 
@@ -559,22 +675,38 @@ export default function App() {
           </>
         )}
       </main>
+      )}
 
+      {!needsSetup && (
       <section className="chat" aria-label="Conversation">
         <header className="chat-head">
-          <strong>{assistantName}</strong>
-          <button className="btn quiet small" onClick={downloadTranscript} disabled={!locked}>
-            Download transcript
-          </button>
+          <div>
+            <strong>{assistantName}</strong>
+            {isGeneral && <span className="chat-sub">General learning</span>}
+          </div>
+          <div className="chat-actions">
+            {isGeneral && !locked && (
+              <button className="btn quiet small" onClick={newChat}>
+                Change options
+              </button>
+            )}
+            <button className="btn quiet small" onClick={downloadTranscript} disabled={!locked}>
+              Download transcript
+            </button>
+          </div>
         </header>
 
         <div className="chat-log" ref={logRef} role="log" aria-live="polite">
           {needsTask && <p className="empty">Choose a task on the left to start the conversation.</p>}
           {!needsTask && !locked && !loading && (
             <div className="empty">
-              <p>Say what you're thinking, or start with a question.</p>
+              <p>
+                {isGeneral
+                  ? "What do you want to learn? Name a topic, or tell me what you're stuck on."
+                  : "Say what you're thinking, or start with a question."}
+              </p>
               <div className="starters">
-                {STARTERS.map((s) => (
+                {(isGeneral ? GENERAL_STARTERS : STARTERS).map((s) => (
                   <button key={s} className="btn small" onClick={() => fillStarter(s)}>{s}</button>
                 ))}
               </div>
@@ -605,7 +737,7 @@ export default function App() {
             ref={inputRef}
             rows={2}
             aria-label="Your message"
-            placeholder={needsTask ? "Choose a task first" : "Type your message"}
+            placeholder={needsTask ? "Choose a task first" : isGeneral ? "Type a topic or question" : "Type your message"}
             value={input}
             disabled={needsTask}
             onChange={(e) => setInput(e.target.value)}
@@ -619,6 +751,37 @@ export default function App() {
           </div>
         </div>
       </section>
+      )}
+
+      <dialog
+        ref={aboutRef}
+        className="about"
+        aria-labelledby="about-title"
+        onClick={(e) => e.target === aboutRef.current && aboutRef.current.close()}
+      >
+        <div className="about-body">
+          <h2 id="about-title">About TestSocratic</h2>
+          <p>
+            TestSocratic is a project that utilizes a Socratic AI tutor as a tool for learning software testing. 
+            It guides you with questions in Socratic mode, or Baseline mode that answers directly. 
+          </p>
+          <dl className="credits">
+            {CREDITS.filter(([, v]) => v).map(([k, v]) => (
+              <div key={k}>
+                <dt>{k}</dt>
+                <dd>{v}</dd>
+              </div>
+            ))}
+          </dl>
+          <p className="about-note">
+            Replies come from an AI model and can contain mistakes. Check important points against your course
+            materials. Chats are logged anonymously for the project, so don't enter private or confidential information.
+          </p>
+          <button className="btn primary" onClick={() => aboutRef.current.close()}>
+            Close
+          </button>
+        </div>
+      </dialog>
     </div>
   );
 }
