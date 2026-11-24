@@ -16,3 +16,9 @@ build/
 # editor and OS
 .vscode/
 .DS_Store
+
+# app data and deploy output
+backend/data/
+backend/static/
+deploy/
+deploy.zip
